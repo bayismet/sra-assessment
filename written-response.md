@@ -48,13 +48,13 @@ This is entirely redundant. The agent already has a `search_product_docs` tool t
 
 ### Why the eval did not catch any of this
 
-The eval harness is well-engineered. It uses a different judge model family to avoid self-evaluation bias. It scores on three dimensions — correctness, tone, safety — with weighted composites. It has per-category regression detection with a threshold. It gates CI with a nonzero exit code on regression. The architecture is sound.
+The original eval harness was a 52-line script. It used the same model (`frontier-model-v2`) as both agent and judge — the model scored its own output. It had a single binary PASS/FAIL judgment with no rubric, no per-category breakdown, no regression detection, and no CI gating. It also had a data flow bug: the original `finish()` never returned the response body, so the judge evaluated empty strings against reference answers for five months.
 
-The failure is operational, not architectural. The test suite contains 240 cases written at launch, all targeting v13 product behavior. It has never been updated. There are zero cases testing v14 scenarios and zero cases for access requests. The eval reports 91% because it is testing the agent on five-month-old questions against five-month-old documentation — scenarios the agent still handles correctly. It literally cannot detect the error/troubleshooting collapse because it does not test the scenarios that are failing in production.
+I rewrote the harness to fix these structural problems: independent judge model, three-dimension rubric with weighted composites, per-category stratification, regression detection against a saved baseline, CI exit code on regression, and a staleness gate that warns when the test suite lacks cases for the current product version. But even a well-built harness cannot catch production drift if its test data is stale.
+
+The test suite contains 240 cases written at launch, all targeting v13 product behavior. It has never been updated. There are zero cases testing v14 scenarios and zero cases for access requests. The eval reports 91% because it is testing the agent on five-month-old questions against five-month-old documentation — scenarios the agent still handles correctly. It cannot detect the error/troubleshooting collapse because it does not test the scenarios that are failing in production.
 
 Good tooling without a maintenance process produced the same result as no tooling at all.
-
-There is also a data flow gap: the runtime's `finish()` function only includes the response body and action type in its return dict for reply and clarify outcomes. Escalation cases return only `ticket_id` and `outcome`. The judge handles this with fallback defaults (substituting placeholder text for the missing body), so the eval runs without errors — but escalation quality is evaluated against a placeholder rather than the agent's actual reasoning.
 
 ---
 
@@ -68,7 +68,7 @@ A small change to `finish()` in `sra_runtime.py`: always include `action` and `o
 
 ### Test suite updates (code)
 
-The `EvalCase` dataclass already includes `product_version` and `source` fields, but all 240 cases are v13/launch_set. Changes:
+The `EvalCase` dataclass includes `product_version` and `source` fields to support version-aware evaluation, but the existing 240 cases are all v13/launch_set. Changes:
 
 - Add v14 cases for error/troubleshooting and configuration, sourced from the production quality samples that human reviewers have already graded. Ground truth already exists — these are the cheapest high-value cases to add.
 - Add access request cases. 18% of production volume, zero eval coverage.
@@ -117,10 +117,9 @@ There is a data quality constraint. The admin contact list has a median stalenes
 ### Week-one actions
 
 1. **Fix the KB refresh job.** Highest-ROI single action. Restores v14 documentation and should immediately improve the error/troubleshooting category.
-2. **Deploy the runtime fix.** Small change to `finish()` that makes response data observable in the eval. Prerequisite for everything else.
+2. **Deploy the runtime fix.** The `finish()` change makes response data observable in the eval, and the context stuffing removal (already implemented in the submitted code) eliminates the redundant full-doc load. Run the eval before and after to verify no regression.
 3. **Deploy production monitoring.** Start collecting confidence distributions, reopen rates by category, cost data, and KB freshness. These signals begin accumulating immediately.
 4. **Run the updated eval and save a baseline.** The first honest score will be lower than 91%. That is the point — it will be real.
-5. **Remove context stuffing.** Stop calling `load_context()` on every step. The agent already has `search_product_docs`. Run the eval before and after to verify no regression.
 
 ### Ongoing practices
 
@@ -150,6 +149,6 @@ I went deepest on diagnosis and measurement because they are the leverage points
 
 **What I delegated and what I kept.** I delegated code drafting — the eval harness improvements, the production monitor, and the runtime fix — after designing the approach, selecting the rubric dimensions, and setting the weights. I also delegated prose drafting and structural suggestions for this document. I kept the diagnosis: reading the runtime code, tracing the data flow from `run()` through `finish()` to the eval harness, and identifying that the eval's real failure is operational (stale test suite, no update process) rather than purely a code bug. I kept the root cause analysis connecting the stale KB to the error/troubleshooting collapse. I kept the depth allocation strategy and the judgment that extending before fixing measurement is wrong.
 
-**Where AI got something wrong.** Initial analysis overstated the eval bug, claiming `run()` never returns a response body and that the judge scores empty strings for all cases. In reality, `finish()` does return the body for reply and clarify outcomes — the gap only affects escalation cases, and the judge handles those with fallback defaults. The deeper problem is the stale test suite, not a single code path. I caught this by tracing the data flow line by line through both files. The generated code also initially added unnecessary error handling in paths that could not fail, which I removed.
+**Where AI got something wrong.** Initial analysis correctly identified that the original `finish()` never returned a response body. I initially treated this as the primary eval bug. On deeper analysis, the more critical problem is the stale test suite — even with the data flow fix, an eval testing only v13 scenarios would still report healthy scores. The code fix was necessary but insufficient; the operational failure was the root cause. The generated code also initially added unnecessary error handling in paths that could not fail, which I removed.
 
 **Which conclusions are my own judgment.** The depth trade-off, the root cause attribution (data freshness, not model capability), the framing of the automation-confidence trap, the assessment that the eval architecture is sound but the process around it failed, and the "fix before extend" sequencing.
