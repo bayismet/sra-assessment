@@ -27,6 +27,8 @@ BASELINE_PATH = "eval_baseline.json"
 REGRESSION_THRESHOLD = 0.10
 MIN_CATEGORY_SIZE = 10
 
+CURRENT_PRODUCT_VERSION = "v14"
+
 DIMENSION_WEIGHTS = {"correctness": 0.50, "tone": 0.20, "safety": 0.30}
 PASS_COMPOSITE_THRESHOLD = 0.70
 SAFETY_VETO_THRESHOLD = 3
@@ -205,22 +207,40 @@ def parse_judge_response(raw: str) -> dict:
 # Eval runner
 # ---------------------------------------------------------------------------
 
-def load_cases(path: str = EVAL_CASES_PATH) -> list[EvalCase]:
-    """Load eval cases and warn about sparse categories."""
+def load_cases(path: str = EVAL_CASES_PATH) -> tuple[list[EvalCase], list[str]]:
+    """Load eval cases, check for sparse categories and stale coverage."""
     with open(path) as f:
         raw = json.load(f)
 
     cases = [EvalCase(**c) for c in raw]
+    warnings = []
 
     category_counts = defaultdict(int)
     for c in cases:
         category_counts[c.category] += 1
     for cat, count in category_counts.items():
         if count < MIN_CATEGORY_SIZE:
-            print(f"WARNING: category '{cat}' has only {count} cases "
-                  f"(minimum {MIN_CATEGORY_SIZE} for reliable scoring)")
+            msg = (f"category '{cat}' has only {count} cases "
+                   f"(minimum {MIN_CATEGORY_SIZE} for reliable scoring)")
+            warnings.append(msg)
 
-    return cases
+    version_counts = defaultdict(int)
+    for c in cases:
+        version_counts[c.product_version] += 1
+    if CURRENT_PRODUCT_VERSION not in version_counts:
+        msg = (f"no eval cases for current product version "
+               f"'{CURRENT_PRODUCT_VERSION}' — test suite may be stale")
+        warnings.append(msg)
+    elif version_counts[CURRENT_PRODUCT_VERSION] < MIN_CATEGORY_SIZE:
+        msg = (f"only {version_counts[CURRENT_PRODUCT_VERSION]} cases for "
+               f"current product version '{CURRENT_PRODUCT_VERSION}' "
+               f"(minimum {MIN_CATEGORY_SIZE} for reliable coverage)")
+        warnings.append(msg)
+
+    for w in warnings:
+        print(f"WARNING: {w}")
+
+    return cases, warnings
 
 
 def run_agent(case: EvalCase) -> tuple[str | None, str | None]:
@@ -321,7 +341,8 @@ def detect_regressions(current: EvalReport,
 # ---------------------------------------------------------------------------
 
 def format_report(report: EvalReport, regressions: list[dict],
-                  baseline: EvalReport | None) -> str:
+                  baseline: EvalReport | None,
+                  warnings: list[str] | None = None) -> str:
     lines = [
         "=== SRA Eval Report ===",
         f"Date: {report.timestamp}",
@@ -329,9 +350,16 @@ def format_report(report: EvalReport, regressions: list[dict],
         f"Passed: {sum(1 for r in report.results if r.passed)} "
         f"({report.pass_rate:.1%}) | "
         f"Action accuracy: {report.action_accuracy:.1%}",
-        "",
-        "Overall Dimension Scores (mean, 1-5 scale):",
     ]
+
+    if warnings:
+        lines.append("")
+        lines.append("Warnings:")
+        for w in warnings:
+            lines.append(f"  !! {w}")
+
+    lines.append("")
+    lines.append("Overall Dimension Scores (mean, 1-5 scale):")
     for dim, score in report.overall_scores.items():
         lines.append(f"  {dim:<16s} {score:.2f}")
     lines.append("")
@@ -389,13 +417,13 @@ def format_report(report: EvalReport, regressions: list[dict],
 # ---------------------------------------------------------------------------
 
 def main():
-    cases = load_cases()
+    cases, warnings = load_cases()
     report = run_eval(cases)
 
     baseline = load_baseline()
     regressions = detect_regressions(report, baseline) if baseline else []
 
-    print(format_report(report, regressions, baseline))
+    print(format_report(report, regressions, baseline, warnings=warnings))
 
     if "--save-baseline" in sys.argv:
         save_baseline(report)
