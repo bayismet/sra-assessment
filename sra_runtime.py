@@ -20,8 +20,9 @@ CONFIDENCE_THRESHOLD = 0.7
 
 SYSTEM_PROMPT = """You are a Tier-1 support agent for an ERP product.
 
-Answer the customer's question using the product documentation and customer
-context provided. Be accurate and concise.
+Use the search_product_docs tool to find relevant documentation for the
+customer's question. You have customer context provided, but product
+documentation must be retrieved via tool calls. Be accurate and concise.
 
 Rules you must follow:
 - Never make changes to a customer account. You are read-only.
@@ -44,15 +45,13 @@ class TicketContext:
     history: list = field(default_factory=list)
 
 
-def load_context(ctx: TicketContext) -> str:
-    """Assemble everything the agent might need for this ticket."""
-    product_docs = kb.fetch_product_brain()               # full doc set, ~180 chunks
-    customer = crm.fetch_customer_record(ctx.account_id)  # full record
+def load_customer_context(ctx: TicketContext) -> str:
+    """Assemble customer-specific context once at the start of a run.
+    Product documentation is retrieved via the search_product_docs tool."""
+    customer = crm.fetch_customer_record(ctx.account_id)
     recent = ticketing.recent_tickets(ctx.account_id, limit=20)
 
     return "\n\n".join([
-        "=== PRODUCT DOCUMENTATION ===",
-        "\n".join(c["text"] for c in product_docs),
         "=== CUSTOMER RECORD ===",
         json.dumps(customer, indent=2),
         "=== RECENT TICKETS ===",
@@ -86,13 +85,10 @@ def run(ctx: TicketContext) -> dict:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Ticket: {ctx.subject}\n\n{ctx.body}"},
+        {"role": "user", "content": load_customer_context(ctx)},
     ]
 
     for step in range(MAX_STEPS):
-        # Refresh context each step so the model always has the latest state.
-        context_block = load_context(ctx)
-        messages.append({"role": "user", "content": context_block})
-
         response = llm.complete(
             model=MODEL,
             messages=messages,
@@ -144,7 +140,7 @@ def run(ctx: TicketContext) -> dict:
 def escalate(ctx: TicketContext, trace: dict, reason: str) -> dict:
     ticketing.assign_to_queue(ctx.ticket_id, "tier2")
     ticketing.add_note(ctx.ticket_id, f"SRA escalated: {reason}")
-    return finish(ctx, trace, f"escalated:{reason}")
+    return finish(ctx, trace, f"escalated:{reason}", action="escalate")
 
 
 def finish(ctx: TicketContext, trace: dict, outcome: str,
@@ -157,6 +153,7 @@ def finish(ctx: TicketContext, trace: dict, outcome: str,
     result = {"ticket_id": ctx.ticket_id, "outcome": outcome}
     if body is not None:
         result["body"] = body
+    if action is not None:
         result["action"] = action
     return result
 
