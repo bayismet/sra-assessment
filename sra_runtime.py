@@ -130,10 +130,12 @@ def run(ctx: TicketContext) -> dict:
 
         if decision["action"] == "clarify":
             ticketing.post_reply(ctx.ticket_id, decision["body"], close=False)
-            return finish(ctx, trace, "clarify")
+            return finish(ctx, trace, "clarify",
+                          body=decision["body"], action="clarify")
 
         ticketing.post_reply(ctx.ticket_id, decision["body"], close=True)
-        return finish(ctx, trace, "resolved")
+        return finish(ctx, trace, "resolved",
+                      body=decision["body"], action="reply")
 
     # Ran out of steps.
     return escalate(ctx, trace, reason="max_steps_exceeded")
@@ -145,11 +147,18 @@ def escalate(ctx: TicketContext, trace: dict, reason: str) -> dict:
     return finish(ctx, trace, f"escalated:{reason}")
 
 
-def finish(ctx: TicketContext, trace: dict, outcome: str) -> dict:
+def finish(ctx: TicketContext, trace: dict, outcome: str,
+           body: str | None = None, action: str | None = None) -> dict:
     trace["outcome"] = outcome
     trace["duration"] = time.time() - trace["started"]
+    if body is not None:
+        trace["reply_body"] = body
     log.info(json.dumps(trace))
-    return {"ticket_id": ctx.ticket_id, "outcome": outcome}
+    result = {"ticket_id": ctx.ticket_id, "outcome": outcome}
+    if body is not None:
+        result["body"] = body
+        result["action"] = action
+    return result
 
 
 # TODO: cost tracking — finance asked for per-ticket spend, not built yet
